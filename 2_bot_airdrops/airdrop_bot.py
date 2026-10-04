@@ -768,6 +768,8 @@ if __name__ == "__main__":
     except SystemExit as e:      # бот остановился с сообщением
         if isinstance(e.code, str):
             print(e.code)            # показываем причину
+            if not getattr(sys, "frozen", False):
+                sys.exit(1)          # в облаке GitHub запуск должен стать красным, а не зелёным
     finally:
         if getattr(sys, "frozen", False):          # запущено двойным щелчком по .exe
             try:

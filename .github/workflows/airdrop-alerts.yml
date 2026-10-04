@@ -7,7 +7,7 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
   push:
-    paths: [.github/workflows/airdrop-alerts.yml]
+    paths: [.github/workflows/airdrop-alerts.yml, 2_bot_airdrops/airdrop_bot.py]
 concurrency:
   group: airdrop-alerts
   cancel-in-progress: false
@@ -32,8 +32,16 @@ jobs:
           key: airdrop-state-${{ github.run_id }}
           restore-keys: airdrop-state-
       - run: "[ -f 2_bot_airdrops/sent.json ] || echo '[]' > 2_bot_airdrops/sent.json"
+      - name: Check secrets
+        env:
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          C: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: |
+          [ -n "$T" ] || { echo "::error::Нет секрета TELEGRAM_BOT_TOKEN (Settings -> Secrets and variables -> Actions -> Repository secrets)"; exit 1; }
+          [ -n "$C" ] || { echo "::error::Нет секрета TELEGRAM_CHANNEL_ID"; exit 1; }
+          echo "Секреты на месте"
       - name: Test post (only when this file changes)
-        if: github.event_name == 'push'
+        if: github.event_name != 'schedule'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
