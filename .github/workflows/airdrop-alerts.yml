@@ -1,4 +1,4 @@
-name: airdrop-alerts
+name: airdrop-alerts  # v2
 # Бот аирдропов в облаке GitHub: каждые 30 минут одна проверка, компьютер не нужен.
 # Токен и ID получателей лежат в Settings -> Secrets and variables -> Actions:
 #   TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID (несколько ID через запятую)
