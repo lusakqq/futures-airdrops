@@ -6,6 +6,8 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
+  push:
+    paths: [.github/workflows/airdrop-alerts.yml]
 concurrency:
   group: airdrop-alerts
   cancel-in-progress: false
@@ -30,6 +32,13 @@ jobs:
           key: airdrop-state-${{ github.run_id }}
           restore-keys: airdrop-state-
       - run: "[ -f 2_bot_airdrops/sent.json ] || echo '[]' > 2_bot_airdrops/sent.json"
+      - name: Test post (only when this file changes)
+        if: github.event_name == 'push'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          TIMEZONE: Europe/Kyiv
+        run: python 2_bot_airdrops/airdrop_bot.py --test
       - name: Check announcements
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
