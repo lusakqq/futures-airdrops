@@ -1,0 +1,32 @@
+name: build-windows-exe
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          pip install pyinstaller -r 2_bot_airdrops/requirements.txt -r 3_bot_futures/requirements.txt
+      - name: Build airdrop bot
+        run: pyinstaller --onefile --name airdrop_bot --collect-data tzdata 2_bot_airdrops/airdrop_bot.py
+      - name: Build futures bot
+        run: pyinstaller --onefile --name short_bot --collect-all ccxt 3_bot_futures/short_bot.py
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory release/2_bot_airdrops, release/3_bot_futures | Out-Null
+          Copy-Item dist/airdrop_bot.exe, 2_bot_airdrops/README.md release/2_bot_airdrops/
+          Copy-Item dist/short_bot.exe, 3_bot_futures/README.md release/3_bot_futures/
+          Copy-Item 2_bot_airdrops/.env.example release/2_bot_airdrops/ -ErrorAction SilentlyContinue
+          Copy-Item 3_bot_futures/.env.example release/3_bot_futures/ -ErrorAction SilentlyContinue
+          Copy-Item *.md release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: futures-airdrops-windows
+          path: release
