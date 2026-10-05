@@ -587,11 +587,6 @@ def format_post(ev, event_time, a):
             if f.get("change") is not None:
                 row += f", 24ч {f['change']:+.1f}%"
             lines.append(escape(row))
-        ref = next((f for f in fut if f["ex"] == "Bitget"), fut[0])  # цена для плана: Bitget, если там есть
-        p = ref["price"]
-        lines.append(f"🎯 <b>План шорта</b> (от цены {ref['ex']} ${p:.6g}): стоп-лосс ${p * 1.15:.6g} (+15%), "
-                     f"тейк-профит ${p * 0.75:.6g} (−25%)")
-        lines.append("💵 Плечо 3x, изолированная, $5: стоп ≈ −$2.25, тейк ≈ +$3.75 (без учёта комиссий)")
     elif sym:
         lines.append("📉 <b>Фьючерсы:</b> пока нет ни на одной из 4 бирж")
     info, sup = a["info"], a["sup"]
