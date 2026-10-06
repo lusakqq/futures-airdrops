@@ -42,7 +42,7 @@ jobs:
           [ -n "$C" ] || { echo "::error::Нет секрета TELEGRAM_CHANNEL_ID"; exit 1; }
           echo "Секреты на месте"
       - name: Test post (only when this file changes)
-        if: github.event_name != 'schedule'
+        if: github.event_name == 'push'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
@@ -59,7 +59,7 @@ jobs:
           end=$(( $(date +%s) + 340*60 ))
           while [ "$(date +%s)" -lt "$end" ]; do
             python 2_bot_airdrops/airdrop_bot.py --once || echo "::warning::проверка упала, пробую снова через 5 минут"
-            [ "$(date +%s)" -lt "$end" ] && sleep 300
+            if [ "$(date +%s)" -lt "$end" ]; then sleep 300; fi
           done
       - name: Save sent list
         if: always()
