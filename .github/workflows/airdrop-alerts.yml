@@ -1,10 +1,11 @@
 name: airdrop-alerts  # v2
-# Бот аирдропов в облаке GitHub: каждые 30 минут одна проверка, компьютер не нужен.
+# Бот аирдропов в облаке GitHub: проверка каждые 5 минут, компьютер не нужен.
+# Один запуск работает ~5 ч 40 мин (проверка, пауза 5 мин, снова). Следующий ждёт в очереди и стартует сразу после.
 # Токен и ID получателей лежат в Settings -> Secrets and variables -> Actions:
 #   TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID (несколько ID через запятую)
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
   push:
     paths: [.github/workflows/airdrop-alerts.yml, 2_bot_airdrops/airdrop_bot.py]
@@ -14,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,7 +55,12 @@ jobs:
           TIMEZONE: Europe/Kyiv
           # самый первый запуск без списка: берём только последний час, чтобы не повторить старые посты
           LOOKBACK_HOURS: ${{ steps.state.outputs.cache-matched-key == '' && '1' || '24' }}
-        run: python 2_bot_airdrops/airdrop_bot.py --once
+        run: |
+          end=$(( $(date +%s) + 340*60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            python 2_bot_airdrops/airdrop_bot.py --once || echo "::warning::проверка упала, пробую снова через 5 минут"
+            [ "$(date +%s)" -lt "$end" ] && sleep 300
+          done
       - name: Save sent list
         if: always()
         uses: actions/cache/save@v4
