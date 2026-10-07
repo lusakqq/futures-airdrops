@@ -10,6 +10,8 @@
   3. CoinMarketCap Airdrops API (по желанию). ВНИМАНИЕ: этот раздел API платный
      (тариф Startup и выше). На бесплатном ключе CMC он не работает.
 
+Ещё бот шлёт пост, если новая монета на фьючерсах Bitget (1-14 дней торгов) выросла на 30%+ за сутки.
+
 Каждый пост: биржа, имя токена, дата и время раздачи в вашем часовом поясе, ссылка на источник,
 и картинка: логотип монеты (с CoinGecko) или сгенерированная карточка-инфографика.
 """
@@ -711,6 +713,110 @@ def coingecko_logo(symbol):
 
 
 # ------------------------------------------------------------------
+# ПАМПЫ НОВЫХ МОНЕТ НА ФЬЮЧЕРСАХ BITGET
+# ------------------------------------------------------------------
+
+PUMPS_ON = os.getenv("PUMPS", "1") != "0"                               # PUMPS=0 в .env выключает эти посты
+PUMP_PCT = float(os.getenv("PUMP_PCT", "30"))                           # рост за 24 часа (%), после которого шлём пост
+PUMP_MAX_AGE_DAYS = float(os.getenv("PUMP_MAX_AGE_DAYS", "14"))         # «новая монета» = фьючерсы торгуются не дольше N дней
+
+
+def fetch_bitget_pumps():
+    """Новые монеты на фьючерсах Bitget (1-14 дней торгов), выросшие на PUMP_PCT% и больше за сутки."""
+    contracts = (get_json("Bitget", "https://api.bitget.com/api/v2/mix/market/contracts",
+                          {"productType": "USDT-FUTURES"}) or {}).get("data") or []
+    now_ms = time.time() * 1000
+    young = {}
+    for c in contracts:
+        if c.get("symbolType") != "perpetual" or c.get("symbolStatus") != "normal" or str(c.get("isRwa")).upper() == "YES":
+            continue                                             # акции, золото и т.п. не берём
+        try:
+            days = (now_ms - float(c["openTime"])) / 86400e3      # сколько дней идут торги
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 1 <= days <= PUMP_MAX_AGE_DAYS:                       # день листинга не считаем: про него уже был пост о листинге
+            young[c["symbol"]] = (c.get("baseCoin") or c["symbol"][:-4], days)
+    if not young:
+        return []
+    tickers = (get_json("Bitget", "https://api.bitget.com/api/v2/mix/market/tickers",
+                        {"productType": "USDT-FUTURES"}) or {}).get("data") or []
+    pumps = []
+    for t in tickers:
+        if t.get("symbol") not in young:
+            continue
+        try:
+            change = float(t["change24h"]) * 100                 # рост за 24 часа, %
+            pumps.append({"base": young[t["symbol"]][0], "age": young[t["symbol"]][1], "change": change,
+                          "price": float(t["lastPr"]), "open": float(t["open24h"])})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return [p for p in pumps if p["change"] >= PUMP_PCT]
+
+
+def post_pump(p, dry=False):
+    """Пост про памп новой монеты: рост, возраст, фьючерсы, капитализация."""
+    sym = p["base"]
+    fut = futures_info(sym)
+    info = coin_info(sym, fut)
+    lines = [f"📈 <b>ПАМП НОВОЙ МОНЕТЫ: {escape(sym)}</b>", ""]
+    lines.append("🏦 <b>Биржа:</b> Bitget")
+    lines.append(f"💱 <b>Пара:</b> {escape(sym)}/USDT, фьючерсы (бессрочный контракт)")
+    lines.append(f"🕒 <b>Торгуется:</b> {p['age']:.0f} дн.")
+    lines.append(f"🚀 <b>Рост за 24ч:</b> +{p['change']:.0f}% (с ${p['open']:.6g} до ${p['price']:.6g})")
+    if fut:
+        lines.append("")
+        lines.append("📉 <b>Фьючерсы (можно шортить):</b>")
+        for f in fut:
+            row = f"• {f['ex']}: ${f['price']:.6g}"
+            if f.get("funding") is not None:
+                row += f", фандинг {f['funding'] * 100:+.3f}%"
+            if f.get("oi"):
+                row += f", OI {fmt_money(f['oi'])}"
+            lines.append(escape(row))
+    if info.get("market_cap") or info.get("fully_diluted_valuation"):
+        lines.append(f"💰 <b>Капа:</b> {fmt_money(info.get('market_cap'))}, FDV {fmt_money(info.get('fully_diluted_valuation'))}")
+    lines.append("")
+    lines.append("⚠️ После резкого роста новые монеты часто откатываются, но не всегда: иногда рост продолжается.")
+    lines.append("<i>Это сигнал по правилам, не прогноз и не совет.</i>")
+    lines.append(f"🔗 <a href=\"https://www.bitget.com/futures/usdt/{escape(sym)}USDT\">Открыть на Bitget</a>")
+    caption = "\n".join(lines)
+    logo_url = info.get("image") or coingecko_logo(sym)
+    logo_bytes = None
+    if logo_url:
+        try:
+            logo_bytes = HTTP.get(logo_url, timeout=10).content
+        except requests.RequestException:
+            pass
+    photo = make_card(sym, f"+{p['change']:.0f}% in 24h  ·  {p['age']:.0f} days old", logo_bytes, "PUMP · BITGET")
+    if dry:
+        print(caption, "\n---")
+        return
+    send_photo(photo, caption)
+
+
+def check_pumps(sent, dry=False):
+    """Ищем пампы и шлём посты. Одна монета не чаще раза в 2 дня."""
+    if not PUMPS_ON:
+        return 0
+    posted = 0
+    today = datetime.now(TZ)
+    for p in fetch_bitget_pumps():
+        keys = [f"pump:{p['base']}:{today - timedelta(days=d):%Y-%m-%d}" for d in (0, 1)]
+        if any(k in sent for k in keys):                         # про этот памп уже писали сегодня или вчера
+            continue
+        try:
+            post_pump(p, dry=dry)
+            posted += 1
+            sent.add(keys[0])
+            if not dry:
+                save_sent(sent)
+            time.sleep(1)
+        except Exception as e:
+            print(f"Не удалось отправить памп {p['base']}: {e}")
+    return posted
+
+
+# ------------------------------------------------------------------
 # ГЛАВНЫЙ ЦИКЛ
 # ------------------------------------------------------------------
 
@@ -760,6 +866,7 @@ def run_once(sent, dry=False):
             time.sleep(1)                                        # не спамим Telegram
         except Exception as e:
             print(f"Не удалось отправить {ev['id']}: {e}")
+    posted += check_pumps(sent, dry=dry)                         # плюс пампы новых монет на Bitget
     print(f"{datetime.now(TZ):%H:%M} проверено, отправлено: {posted}")
 
 
