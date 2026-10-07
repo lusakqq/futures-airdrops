@@ -5,7 +5,8 @@
 Источники (только официальные):
   1. Bitget, официальные анонсы через публичный API биржи (бесплатно, ключ не нужен).
      Это главный источник: вы торгуете на Bitget, и время раздачи/листинга там указано точно.
-  2. Официальные анонсы Binance, Bybit, OKX и KuCoin (тоже бесплатно, без ключей).
+  2. Официальные анонсы Binance, Bybit, OKX и KuCoin (тоже бесплатно, без ключей)
+     и их официальные Telegram-каналы (туда биржи дублируют посты из X/Twitter), плюс канал MEXC.
   3. CoinMarketCap Airdrops API (по желанию). ВНИМАНИЕ: этот раздел API платный
      (тариф Startup и выше). На бесплатном ключе CMC он не работает.
 
@@ -51,7 +52,7 @@ INCLUDE = re.compile(os.getenv("INCLUDE_REGEX", r"airdrop|claim|token distributi
 LISTING = re.compile(os.getenv("LISTING_REGEX", r"will list|to list|listed on|new listing|will launch|launched for|lists |pre-market|perpetual contract"), re.I)
 LISTINGS_ON = os.getenv("LISTINGS", "1") != "0"
 # Слова, по которым анонс отбрасываем (конкурсы, акции, розыгрыши - это не раздача токена)
-EXCLUDE = re.compile(os.getenv("EXCLUDE_REGEX", r"competition|carnival|giveaway|lucky draw|trading challenge|campaign|delist|cashback|quiz|adjust|risk limit|maintenance|"
+EXCLUDE = re.compile(os.getenv("EXCLUDE_REGEX", r"competition|carnival|giveaway|lucky draw|trading challenge|tournament|winner|voucher|prediction|campaign|delist|cashback|quiz|adjust|risk limit|maintenance|"
                                        r"funding rate|tradfi|stock|pre-ipo|tokenized|collateral|quarterly|delivery|on earn|margin will add|extension"), re.I)
 
 STATE_FILE = os.path.join(BASE_DIR, "sent.json")  # файл с уже отправленными постами
@@ -283,10 +284,38 @@ def fetch_kucoin():
     return [e for e in events if e]
 
 
+# Официальные Telegram-каналы бирж: туда дублируют посты из их X (Twitter). Читаем публичную веб-версию t.me/s/...
+TG_CHANNELS = {"Bybit_Announcements": "Bybit", "mexcofficialnews": "MEXC", "binance_announcements": "Binance",
+               "Bitget_Announcements": "Bitget", "OKXAnnouncements": "OKX", "Kucoin_News": "KuCoin"}
+
+
+def fetch_telegram():
+    """Свежие посты официальных каналов бирж в Telegram."""
+    events = []
+    for channel, exchange in TG_CHANNELS.items():
+        try:
+            page = HTTP.get(f"https://t.me/s/{channel}", timeout=15).text
+        except requests.RequestException as e:
+            print(f"Telegram {channel}: ошибка {e}")
+            continue
+        for block in page.split('class="tgme_widget_message_wrap')[1:]:   # каждый пост канала
+            post = re.search(r'data-post="([^"]+)"', block)
+            body = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', block, re.S)
+            when = re.search(r'<time datetime="([^"]+)"', block)
+            if not (post and body and when):
+                continue
+            text = re.sub(r"\s+", " ", unescape(re.sub(r"<br\s*/?>", " ", body[1])))
+            text = re.sub(r"<[^>]+>", "", text).strip()
+            title = text.split(". ")[0][:150]                    # первое предложение = заголовок
+            events.append(make_event(exchange, f"tg:{post[1]}", title, text[:600],
+                                     f"https://t.me/{post[1]}", datetime.fromisoformat(when[1])))
+    return [e for e in events if e]
+
+
 def fetch_exchanges():
     """Все биржи сразу. Ошибка одной биржи не мешает остальным."""
     events = []
-    for fetch in (fetch_bitget, fetch_binance, fetch_bybit, fetch_okx, fetch_kucoin):
+    for fetch in (fetch_bitget, fetch_binance, fetch_bybit, fetch_okx, fetch_kucoin, fetch_telegram):
         try:
             events += fetch()
         except Exception as e:
