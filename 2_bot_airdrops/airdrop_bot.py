@@ -561,7 +561,7 @@ def load_font(size):
     return ImageFont.load_default(size=size)
 
 
-def make_card(symbol, when_text, logo_bytes=None, header="AIRDROP / CLAIM", risk=""):
+def make_card(symbol, when_text, logo_bytes=None, header="AIRDROP / CLAIM", risk="", title=None):
     """Рисуем картинку 1080x608: логотип (если есть), пара, время и риск."""
     img = Image.new("RGB", (1080, 608), (17, 24, 39))            # тёмный фон
     d = ImageDraw.Draw(img)
@@ -575,7 +575,7 @@ def make_card(symbol, when_text, logo_bytes=None, header="AIRDROP / CLAIM", risk
         except Exception:
             pass
     d.text((x, 130), header, font=load_font(40), fill=(0, 200, 170))
-    d.text((x, 200), f"{symbol or 'TOKEN'}/USDT", font=load_font(96), fill=(255, 255, 255))
+    d.text((x, 200), title or f"{symbol or 'TOKEN'}/USDT", font=load_font(96), fill=(255, 255, 255))
     d.text((x, 350), when_text, font=load_font(38), fill=(200, 210, 225))
     if risk:
         color = {"high": (239, 68, 68), "mid": (234, 179, 8), "low": (34, 197, 94)}[risk]
@@ -794,6 +794,15 @@ def post_pump(p, dry=False):
     send_photo(photo, caption)
 
 
+def log_post(sent, kind, source, symbol):
+    """Запоминаем пост для утренней сводки. Записи старше 3 дней удаляем."""
+    now = time.time()
+    sent.add(f"log:{int(now)}|{kind}|{source}|{symbol or '?'}")
+    for item in [x for x in sent if x.startswith("log:")]:
+        if now - int(item[4:].split("|")[0]) > 3 * 86400:
+            sent.discard(item)
+
+
 def check_pumps(sent, dry=False):
     """Ищем пампы и шлём посты. Одна монета не чаще раза в 2 дня."""
     if not PUMPS_ON:
@@ -808,12 +817,65 @@ def check_pumps(sent, dry=False):
             post_pump(p, dry=dry)
             posted += 1
             sent.add(keys[0])
+            log_post(sent, "pump", "Bitget", p["base"])
             if not dry:
                 save_sent(sent)
             time.sleep(1)
         except Exception as e:
             print(f"Не удалось отправить памп {p['base']}: {e}")
     return posted
+
+
+# ------------------------------------------------------------------
+# УТРЕННЯЯ СВОДКА
+# ------------------------------------------------------------------
+
+DIGEST_HOUR = int(os.getenv("DIGEST_HOUR", "10"))                       # во сколько слать сводку (по TIMEZONE); -1 = выключить
+
+
+def send_digest(sent, dry=False):
+    """Раз в день: что бот прислал за сутки + новые монеты на фьючерсах Bitget и их рост."""
+    now = datetime.now(TZ)
+    key = f"digest:{now:%Y-%m-%d}"
+    if DIGEST_HOUR < 0 or now.hour < DIGEST_HOUR or key in sent:
+        return 0
+    names = {"listing": "листинг", "airdrop": "аирдроп", "pump": "памп"}
+    posts = []
+    for item in sent:
+        if item.startswith("log:"):
+            ts, kind, source, symbol = item[4:].split("|")
+            if time.time() - int(ts) <= 86400:
+                posts.append((int(ts), f"• {escape(symbol)}: {names.get(kind, kind)}, {escape(source)}"))
+    lines = [f"☀️ <b>Утренняя сводка {now:%d.%m}</b>", ""]
+    lines.append(f"📬 <b>За сутки постов:</b> {len(posts)}")
+    lines += [row for _, row in sorted(posts)] or ["• новых событий не было"]
+    young = []                                                   # новые монеты на фьючерсах Bitget
+    contracts = (get_json("Bitget", "https://api.bitget.com/api/v2/mix/market/contracts",
+                          {"productType": "USDT-FUTURES"}) or {}).get("data") or []
+    tickers = {t["symbol"]: t for t in (get_json("Bitget", "https://api.bitget.com/api/v2/mix/market/tickers",
+                                                 {"productType": "USDT-FUTURES"}) or {}).get("data") or []}
+    for c in contracts:
+        if c.get("symbolType") != "perpetual" or c.get("symbolStatus") != "normal" or str(c.get("isRwa")).upper() == "YES":
+            continue
+        try:
+            days = (time.time() * 1000 - float(c["openTime"])) / 86400e3
+            change = float(tickers[c["symbol"]]["change24h"]) * 100
+        except (KeyError, TypeError, ValueError):
+            continue
+        if days <= PUMP_MAX_AGE_DAYS:
+            young.append((days, f"• {escape(c.get('baseCoin') or c['symbol'])}: {days:.0f} дн., 24ч {change:+.1f}%"))
+    lines.append("")
+    lines.append(f"🆕 <b>Новые монеты на фьючерсах Bitget</b> (до {PUMP_MAX_AGE_DAYS:.0f} дней):")
+    lines += [row for _, row in sorted(young)] or ["• сейчас нет"]
+    caption = "\n".join(lines)
+    photo = make_card(None, f"{now:%d.%m.%Y}  ·  {len(posts)} posts in 24h", None, "MORNING SUMMARY", title="DIGEST")
+    if dry:
+        print(caption, "\n---")
+    else:
+        send_photo(photo, caption)
+        sent.add(key)
+        save_sent(sent)
+    return 1
 
 
 # ------------------------------------------------------------------
@@ -861,12 +923,17 @@ def run_once(sent, dry=False):
             sent.add(ev["id"])                                   # запоминаем, чтобы не отправить второй раз
             if key:
                 sent.add(key)
+            log_post(sent, ev.get("kind"), ev["source"], ev.get("symbol"))
             if not dry:                                          # в режиме проверки ничего не сохраняем на диск
                 save_sent(sent)
             time.sleep(1)                                        # не спамим Telegram
         except Exception as e:
             print(f"Не удалось отправить {ev['id']}: {e}")
     posted += check_pumps(sent, dry=dry)                         # плюс пампы новых монет на Bitget
+    try:
+        send_digest(sent, dry=dry)                               # раз в день утренняя сводка
+    except Exception as e:
+        print(f"Не удалось отправить сводку: {e}")
     print(f"{datetime.now(TZ):%H:%M} проверено, отправлено: {posted}")
 
 
