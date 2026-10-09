@@ -10,7 +10,7 @@
   3. CoinMarketCap Airdrops API (по желанию). ВНИМАНИЕ: этот раздел API платный
      (тариф Startup и выше). На бесплатном ключе CMC он не работает.
 
-Ещё бот шлёт пост, если новая монета на фьючерсах Bitget (1-14 дней торгов) выросла на 30%+ за сутки.
+Ещё бот шлёт пост о пампе на фьючерсах Bitget: новая монета (1-14 дней торгов) +30% за сутки, любая другая +40%.
 
 Каждый пост: биржа, имя токена, дата и время раздачи в вашем часовом поясе, ссылка на источник,
 и картинка: логотип монеты (с CoinGecko) или сгенерированная карточка-инфографика.
@@ -719,6 +719,7 @@ def coingecko_logo(symbol):
 PUMPS_ON = os.getenv("PUMPS", "1") != "0"                               # PUMPS=0 в .env выключает эти посты
 PUMP_PCT = float(os.getenv("PUMP_PCT", "30"))                           # рост за 24 часа (%), после которого шлём пост
 PUMP_MAX_AGE_DAYS = float(os.getenv("PUMP_MAX_AGE_DAYS", "14"))         # «новая монета» = фьючерсы торгуются не дольше N дней
+OLD_PUMP_PCT = float(os.getenv("OLD_PUMP_PCT", "40"))                   # для остальных (старых) монет порог выше; -1 = выключить
 
 
 def fetch_bitget_pumps():
@@ -733,9 +734,10 @@ def fetch_bitget_pumps():
         try:
             days = (now_ms - float(c["openTime"])) / 86400e3      # сколько дней идут торги
         except (KeyError, TypeError, ValueError):
-            continue
-        if 1 <= days <= PUMP_MAX_AGE_DAYS:                       # день листинга не считаем: про него уже был пост о листинге
-            young[c["symbol"]] = (c.get("baseCoin") or c["symbol"][:-4], days)
+            days = None                                          # дата неизвестна: значит, монета старая
+        if days is not None and days < 1:
+            continue                                             # день листинга не считаем: про него уже был пост о листинге
+        young[c["symbol"]] = (c.get("baseCoin") or c["symbol"][:-4], days)
     if not young:
         return []
     tickers = (get_json("Bitget", "https://api.bitget.com/api/v2/mix/market/tickers",
@@ -750,7 +752,11 @@ def fetch_bitget_pumps():
                           "price": float(t["lastPr"]), "open": float(t["open24h"])})
         except (KeyError, TypeError, ValueError):
             continue
-    return [p for p in pumps if p["change"] >= PUMP_PCT]
+    def is_pump(p):
+        if p["age"] is not None and p["age"] <= PUMP_MAX_AGE_DAYS:
+            return p["change"] >= PUMP_PCT                       # новая монета: от +30%
+        return OLD_PUMP_PCT >= 0 and p["change"] >= OLD_PUMP_PCT  # старая монета: от +40%
+    return [p for p in pumps if is_pump(p)]
 
 
 def post_pump(p, dry=False):
@@ -758,10 +764,12 @@ def post_pump(p, dry=False):
     sym = p["base"]
     fut = futures_info(sym)
     info = coin_info(sym, fut)
-    lines = [f"📈 <b>ПАМП НОВОЙ МОНЕТЫ: {escape(sym)}</b>", ""]
+    new = p["age"] is not None and p["age"] <= PUMP_MAX_AGE_DAYS
+    lines = [f"📈 <b>ПАМП {'НОВОЙ МОНЕТЫ' if new else 'МОНЕТЫ'}: {escape(sym)}</b>", ""]
     lines.append("🏦 <b>Биржа:</b> Bitget")
     lines.append(f"💱 <b>Пара:</b> {escape(sym)}/USDT, фьючерсы (бессрочный контракт)")
-    lines.append(f"🕒 <b>Торгуется:</b> {p['age']:.0f} дн.")
+    if new:
+        lines.append(f"🕒 <b>Торгуется:</b> {p['age']:.0f} дн.")
     lines.append(f"🚀 <b>Рост за 24ч:</b> +{p['change']:.0f}% (с ${p['open']:.6g} до ${p['price']:.6g})")
     if fut:
         lines.append("")
@@ -776,7 +784,7 @@ def post_pump(p, dry=False):
     if info.get("market_cap") or info.get("fully_diluted_valuation"):
         lines.append(f"💰 <b>Капа:</b> {fmt_money(info.get('market_cap'))}, FDV {fmt_money(info.get('fully_diluted_valuation'))}")
     lines.append("")
-    lines.append("⚠️ После резкого роста новые монеты часто откатываются, но не всегда: иногда рост продолжается.")
+    lines.append("⚠️ После резкого роста монеты часто откатываются, но не всегда: иногда рост продолжается.")
     lines.append("<i>Это сигнал по правилам, не прогноз и не совет.</i>")
     lines.append(f"🔗 <a href=\"https://www.bitget.com/futures/usdt/{escape(sym)}USDT\">Открыть на Bitget</a>")
     caption = "\n".join(lines)
@@ -787,7 +795,8 @@ def post_pump(p, dry=False):
             logo_bytes = HTTP.get(logo_url, timeout=10).content
         except requests.RequestException:
             pass
-    photo = make_card(sym, f"+{p['change']:.0f}% in 24h  ·  {p['age']:.0f} days old", logo_bytes, "PUMP · BITGET")
+    sub = f"+{p['change']:.0f}% in 24h" + (f"  ·  {p['age']:.0f} days old" if new else "")
+    photo = make_card(sym, sub, logo_bytes, "PUMP · BITGET")
     if dry:
         print(caption, "\n---")
         return
