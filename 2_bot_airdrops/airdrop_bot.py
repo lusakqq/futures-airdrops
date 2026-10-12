@@ -10,7 +10,8 @@
   3. CoinMarketCap Airdrops API (по желанию). ВНИМАНИЕ: этот раздел API платный
      (тариф Startup и выше). На бесплатном ключе CMC он не работает.
 
-Ещё бот шлёт пост о пампе на фьючерсах Bitget: новая монета (1-14 дней торгов) +30% за сутки, любая другая +40%.
+Ещё бот шлёт пост о пампе на фьючерсах Bitget: новая монета (1-14 дней торгов) +30% за сутки, любая другая +40%,
+если объём торгов за сутки не меньше $1M.
 
 Каждый пост: биржа, имя токена, дата и время раздачи в вашем часовом поясе, ссылка на источник,
 и картинка: логотип монеты (с CoinGecko) или сгенерированная карточка-инфографика.
@@ -719,6 +720,7 @@ def coingecko_logo(symbol):
 PUMPS_ON = os.getenv("PUMPS", "1") != "0"                               # PUMPS=0 в .env выключает эти посты
 PUMP_PCT = float(os.getenv("PUMP_PCT", "30"))                           # рост за 24 часа (%), после которого шлём пост
 PUMP_MAX_AGE_DAYS = float(os.getenv("PUMP_MAX_AGE_DAYS", "14"))         # «новая монета» = фьючерсы торгуются не дольше N дней
+PUMP_MIN_VOLUME = float(os.getenv("PUMP_MIN_VOLUME", "1000000"))        # мин. объём торгов за 24ч, $ (мелкие монеты легко двигать)
 OLD_PUMP_PCT = float(os.getenv("OLD_PUMP_PCT", "40"))                   # для остальных (старых) монет порог выше; -1 = выключить
 
 
@@ -748,8 +750,11 @@ def fetch_bitget_pumps():
             continue
         try:
             change = float(t["change24h"]) * 100                 # рост за 24 часа, %
+            volume = float(t.get("usdtVolume") or t.get("quoteVolume") or 0)  # объём торгов за 24ч в $
+            if volume < PUMP_MIN_VOLUME:
+                continue                                         # мусорная монета с маленьким объёмом: пропускаем
             pumps.append({"base": young[t["symbol"]][0], "age": young[t["symbol"]][1], "change": change,
-                          "price": float(t["lastPr"]), "open": float(t["open24h"])})
+                          "price": float(t["lastPr"]), "open": float(t["open24h"]), "volume": volume})
         except (KeyError, TypeError, ValueError):
             continue
     def is_pump(p):
@@ -771,6 +776,7 @@ def post_pump(p, dry=False):
     if new:
         lines.append(f"🕒 <b>Торгуется:</b> {p['age']:.0f} дн.")
     lines.append(f"🚀 <b>Рост за 24ч:</b> +{p['change']:.0f}% (с ${p['open']:.6g} до ${p['price']:.6g})")
+    lines.append(f"📊 <b>Объём за 24ч:</b> {fmt_money(p['volume'])}")
     if fut:
         lines.append("")
         lines.append("📉 <b>Фьючерсы (можно шортить):</b>")
