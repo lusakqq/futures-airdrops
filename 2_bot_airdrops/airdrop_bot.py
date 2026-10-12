@@ -646,25 +646,27 @@ def tg(method, **kw):
         raise RuntimeError(r.text)
 
 
-def send_photo_to(chat_id, photo_bytes, caption):
-    """Картинка с подписью одному получателю. Подпись к фото не длиннее 1024 символов, остальное шлём следом текстом."""
+def send_photo_to(chat_id, photo_bytes, caption, button=None):
+    """Картинка с подписью одному получателю. Подпись к фото не длиннее 1024 символов, остальное шлём следом текстом.
+    button = (текст, ссылка): кнопка под постом."""
+    markup = {"reply_markup": json.dumps({"inline_keyboard": [[{"text": button[0], "url": button[1]}]]})} if button else {}
     if len(caption) <= 1024:
-        tg("sendPhoto", data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+        tg("sendPhoto", data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", **markup},
            files={"photo": ("airdrop.png", photo_bytes)})
         return
     cut = caption.rfind("\n\n", 0, 1024)                         # режем по пустой строке
     tg("sendPhoto", data={"chat_id": chat_id, "caption": caption[:cut], "parse_mode": "HTML"},
        files={"photo": ("airdrop.png", photo_bytes)})
     tg("sendMessage", data={"chat_id": chat_id, "text": caption[cut:].strip(), "parse_mode": "HTML",
-                            "disable_web_page_preview": True})
+                            "disable_web_page_preview": True, **markup})
 
 
-def send_photo(photo_bytes, caption):
+def send_photo(photo_bytes, caption, button=None):
     """Шлём пост всем получателям. Если кому-то не дошло (не нажал Start), остальным всё равно отправляем."""
     errors = []
     for chat_id in CHAT_IDS:
         try:
-            send_photo_to(chat_id, photo_bytes, caption)
+            send_photo_to(chat_id, photo_bytes, caption, button)
         except Exception as e:
             print(f"Получатель {chat_id}: не отправлено ({e}). Он должен нажать Start в боте.")
             errors.append(chat_id)
@@ -692,10 +694,13 @@ def post_event(ev, dry=False):
     risk = {"🔴": "high", "🟡": "mid", "🟢": "low"}[a["risk"][0][:1]]
     photo = make_card(ev["symbol"], when, logo_bytes, f"{kind} · {ev['source'].upper()}", risk)
     caption = format_post(ev, event_time, a)
+    button = None
+    if any(f["ex"] == "Bitget" for f in a["fut"]):              # на Bitget есть фьючерс: кнопка прямо на него
+        button = ("Открыть на Bitget", f"https://www.bitget.com/futures/usdt/{ev['symbol']}USDT")
     if dry:                                                      # режим проверки: печатаем, не отправляем
-        print(caption, "\n---")
+        print(caption, "\n[кнопка]", button, "\n---")
         return photo
-    send_photo(photo, caption)
+    send_photo(photo, caption, button)
     return photo
 
 
@@ -792,8 +797,8 @@ def post_pump(p, dry=False):
     lines.append("")
     lines.append("⚠️ После резкого роста монеты часто откатываются, но не всегда: иногда рост продолжается.")
     lines.append("<i>Это сигнал по правилам, не прогноз и не совет.</i>")
-    lines.append(f"🔗 <a href=\"https://www.bitget.com/futures/usdt/{escape(sym)}USDT\">Открыть на Bitget</a>")
     caption = "\n".join(lines)
+    button = ("Открыть на Bitget", f"https://www.bitget.com/futures/usdt/{sym}USDT")
     logo_url = info.get("image") or coingecko_logo(sym)
     logo_bytes = None
     if logo_url:
@@ -804,9 +809,9 @@ def post_pump(p, dry=False):
     sub = f"+{p['change']:.0f}% in 24h" + (f"  ·  {p['age']:.0f} days old" if new else "")
     photo = make_card(sym, sub, logo_bytes, "PUMP · BITGET")
     if dry:
-        print(caption, "\n---")
+        print(caption, "\n[кнопка]", button, "\n---")
         return
-    send_photo(photo, caption)
+    send_photo(photo, caption, button)
 
 
 def log_post(sent, kind, source, symbol):
@@ -833,12 +838,95 @@ def check_pumps(sent, dry=False):
             posted += 1
             sent.add(keys[0])
             log_post(sent, "pump", "Bitget", p["base"])
+            sent.add(f"track:{int(time.time())}|{p['base']}|{p['price']}")  # через сутки проверим, что стало с ценой
             if not dry:
                 save_sent(sent)
             time.sleep(1)
         except Exception as e:
             print(f"Не удалось отправить памп {p['base']}: {e}")
     return posted
+
+
+# ------------------------------------------------------------------
+# ОТЧЁТ ПО СИГНАЛАМ: ЧТО СТАЛО С ЦЕНОЙ ЧЕРЕЗ СУТКИ
+# ------------------------------------------------------------------
+
+def signal_result(sym, start, entry, hours=24):
+    """Шорт от цены сигнала: стоп +15%, тейк -25%. Смотрим часовые свечи Bitget за `hours` часов.
+    Если в одной свече задело и стоп, и тейк, считаем стоп (осторожно). Возвращаем (итог, цена выхода)."""
+    j = get_json("Bitget", "https://api.bitget.com/api/v2/mix/market/candles",
+                 {"symbol": f"{sym}USDT", "productType": "USDT-FUTURES", "granularity": "1H",
+                  "startTime": int(start * 1000), "endTime": int((start + hours * 3600) * 1000), "limit": 100})
+    bars = sorted((j or {}).get("data") or [], key=lambda b: int(b[0]))
+    if not bars:
+        return None
+    stop, take = entry * 1.15, entry * 0.75
+    for b in bars:
+        if float(b[2]) >= stop:
+            return "stop", stop
+        if float(b[3]) <= take:
+            return "take", take
+    return "open", float(bars[-1][4])                            # ни стоп, ни тейк: цена на конец суток
+
+
+def pnl_usd(entry, exit_price):
+    """Прибыль шорта на $5 с плечом 3x (позиция $15), минус комиссии ~0.12%."""
+    return 15 * (entry - exit_price) / entry - 15 * 0.0012
+
+
+def check_tracks(sent, dry=False):
+    """Через сутки после пампа пишем, что было бы со сделкой. Итоги храним 8 дней для сводки."""
+    now = time.time()
+    for item in [x for x in sent if x.startswith("track:")]:
+        ts, sym, entry = item[6:].split("|")
+        ts, entry = int(ts), float(entry)
+        if now - ts < 24 * 3600:
+            continue                                             # сутки ещё не прошли
+        res = signal_result(sym, ts, entry)
+        if res is None:
+            if now - ts > 3 * 86400:
+                sent.discard(item)                               # данных так и нет: забываем
+            continue
+        how, exit_price = res
+        pnl = pnl_usd(entry, exit_price)
+        change = (exit_price / entry - 1) * 100
+        title = {"take": "✅ сработал тейк −25%", "stop": "❌ сработал стоп +15%",
+                 "open": "⏳ ни тейк, ни стоп за сутки"}[how]
+        lines = [f"📋 <b>Итог сигнала через сутки: {escape(sym)}</b>", "",
+                 f"Цена в момент поста: ${entry:.6g}",
+                 f"{'Цена выхода' if how != 'open' else 'Цена сейчас'}: ${exit_price:.6g} ({change:+.1f}%)",
+                 title,
+                 f"💵 Шорт $5 с плечом 3x: {pnl:+.2f}$" + (" (если закрыть сейчас)" if how == "open" else ""),
+                 "", "<i>Это проверка сигнала задним числом, не совет.</i>"]
+        caption = "\n".join(lines)
+        photo = make_card(sym, f"{change:+.1f}% in 24h  ·  {pnl:+.2f}$", None, "SIGNAL RESULT · BITGET")
+        if dry:
+            print(caption, "\n---")
+            continue
+        try:
+            send_photo(photo, caption)
+        except Exception as e:
+            print(f"Не удалось отправить итог {sym}: {e}")
+            continue
+        sent.discard(item)
+        sent.add(f"result:{ts}|{sym}|{how}|{pnl:.2f}")
+        save_sent(sent)
+    for item in [x for x in sent if x.startswith("result:")]:
+        if now - int(item[7:].split("|")[0]) > 8 * 86400:
+            sent.discard(item)
+
+
+def week_stats(sent):
+    """Итог сигналов о пампах за 7 дней одной строкой для утренней сводки."""
+    rows = [x[7:].split("|") for x in sent if x.startswith("result:")]
+    rows = [r for r in rows if time.time() - int(r[0]) <= 7 * 86400]
+    if not rows:
+        return "• итогов пока нет"
+    total = sum(float(r[3]) for r in rows)
+    takes = sum(r[2] == "take" for r in rows)
+    stops = sum(r[2] == "stop" for r in rows)
+    return (f"• сигналов: {len(rows)}, тейк: {takes}, стоп: {stops}, без выхода за сутки: {len(rows) - takes - stops}\n"
+            f"• итог при $5 и 3x: {total:+.2f}$")
 
 
 # ------------------------------------------------------------------
@@ -882,6 +970,9 @@ def send_digest(sent, dry=False):
     lines.append("")
     lines.append(f"🆕 <b>Новые монеты на фьючерсах Bitget</b> (до {PUMP_MAX_AGE_DAYS:.0f} дней):")
     lines += [row for _, row in sorted(young)] or ["• сейчас нет"]
+    lines.append("")
+    lines.append("📈 <b>Пампы за 7 дней (шорт со стопом +15% и тейком −25%):</b>")
+    lines.append(week_stats(sent))
     caption = "\n".join(lines)
     photo = make_card(None, f"{now:%d.%m.%Y}  ·  {len(posts)} posts in 24h", None, "MORNING SUMMARY", title="DIGEST")
     if dry:
@@ -945,6 +1036,10 @@ def run_once(sent, dry=False):
         except Exception as e:
             print(f"Не удалось отправить {ev['id']}: {e}")
     posted += check_pumps(sent, dry=dry)                         # плюс пампы новых монет на Bitget
+    try:
+        check_tracks(sent, dry=dry)                              # итоги пампов через сутки
+    except Exception as e:
+        print(f"Не удалось проверить итоги сигналов: {e}")
     try:
         send_digest(sent, dry=dry)                               # раз в день утренняя сводка
     except Exception as e:
